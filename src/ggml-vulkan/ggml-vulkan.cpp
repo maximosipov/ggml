@@ -6087,15 +6087,21 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->subgroup_arithmetic = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                       (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eArithmetic);
 #ifdef __APPLE__
-        // Workaround for subgroup arithmetic failing on MoltenVK with AMD GPUs (issue 15846)
-        if (device->vendor_id == VK_VENDOR_ID_AMD) {
+        // Workaround for subgroup arithmetic failing on MoltenVK with AMD GPUs (issue 15846).
+        // mac-radeon-ai: the same MoltenVK subgroup mistranslation also breaks Intel iGPUs
+        // (UHD 630): the subgroup mul_mat_vec shaders produce numerically wrong matmul
+        // (test-backend-ops -o MUL_MAT: every case fails, err 2-11) -> token-salad. Disabling
+        // subgroup arithmetic routes Intel to the non-subgroup shaders AMD already uses here.
+        if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
             device->subgroup_arithmetic = false;
         }
 #endif
         device->subgroup_shuffle = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                    (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eShuffle);
 #ifdef __APPLE__
-        if (device->vendor_id == VK_VENDOR_ID_AMD) {
+        // mac-radeon-ai: extend the AMD subgroup_shuffle workaround to Intel iGPUs too
+        // (same MoltenVK subgroup mistranslation, see subgroup_arithmetic above).
+        if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
             device->subgroup_shuffle = false;
         }
 #endif
