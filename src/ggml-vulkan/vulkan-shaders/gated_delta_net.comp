@@ -19,6 +19,16 @@ layout(constant_id = 3) const uint LANES_PER_COLUMN = 32;
 const uint COLS_PER_WG = SUBGROUP_SIZE / LANES_PER_COLUMN;
 const uint ROWS_PER_LANE = S_V / LANES_PER_COLUMN;
 
+// mac-radeon-ai: subgroup-op variants need the real subgroup lane; the shared-memory
+// variant (used on MoltenVK, where subgroup arithmetic is disabled) must instead use the
+// linear workgroup index, because MoltenVK does not lay a workgroup out as one contiguous
+// subgroup of SUBGROUP_SIZE. local_size_x == SUBGROUP_SIZE so the range matches.
+#if USE_SUBGROUP_ADD || USE_SUBGROUP_CLUSTERED
+#define GDN_INVOCATION_ID gl_SubgroupInvocationID
+#else
+#define GDN_INVOCATION_ID gl_LocalInvocationID.x
+#endif
+
 layout(local_size_x_id = 2, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform Parameters {
@@ -47,7 +57,9 @@ shared FLOAT_TYPE temp[SUBGROUP_SIZE];
 
 // This does a reduction across groups of LANES_PER_COLUMN
 FLOAT_TYPE reduce_add_shmem(FLOAT_TYPE partial) {
-    const uint lane = gl_SubgroupInvocationID;
+    // mac-radeon-ai: use gl_LocalInvocationID.x (not gl_SubgroupInvocationID) so the shmem
+    // index matches the linear workgroup layout on MoltenVK (see main() and ssm_scan.comp).
+    const uint lane = gl_LocalInvocationID.x;
     temp[lane] = partial;
     barrier();
     [[unroll]] for (uint s = LANES_PER_COLUMN / 2u; s > 0; s >>= 1u) {
@@ -95,8 +107,8 @@ FLOAT_TYPE reduce_partial(FLOAT_TYPE partial) {
 void main() {
     const uint head_id = gl_WorkGroupID.x;
     const uint seq_id = gl_WorkGroupID.y;
-    const uint lane = gl_SubgroupInvocationID % LANES_PER_COLUMN;
-    const uint col = gl_WorkGroupID.z * COLS_PER_WG + (gl_SubgroupInvocationID / LANES_PER_COLUMN);
+    const uint lane = GDN_INVOCATION_ID % LANES_PER_COLUMN;
+    const uint col = gl_WorkGroupID.z * COLS_PER_WG + (GDN_INVOCATION_ID / LANES_PER_COLUMN);
 
     const uint iq1 = head_id % neq1;
     const uint iq3 = seq_id / rq3;
