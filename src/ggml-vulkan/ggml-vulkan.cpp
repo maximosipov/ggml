@@ -6151,7 +6151,35 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device->coopmat_support = false;
         }
 
+        // Whether the driver merely exposes VK_KHR_shader_integer_dot_product, before the
+        // "is it accelerated" question is applied.
+        const bool integer_dot_extension = device->integer_dot_product;
         device->integer_dot_product = device->integer_dot_product && shader_integer_dot_product_props.integerDotProduct4x8BitPackedSignedAccelerated;
+        // mac-radeon-ai: MoltenVK exposes VK_KHR_shader_integer_dot_product but reports
+        // *Accelerated=false (RDNA1 has no native int8 dot), so the mmvq path is off.
+        // Allow forcing it on to measure whether emulated int dot still beats float
+        // dequant on this driver.
+        
+#ifdef __APPLE__
+        // MoltenVK advertises VK_KHR_shader_integer_dot_product but reports every
+        // *Accelerated flag false, because Metal exposes no DP4a-style intrinsic -- so the
+        // gate above turns the path off even though Navi 14 silicon has V_DOT4_I32_I8.
+        // SPIRV-Cross emits the emulation as reduce_add(int4(...) * int4(...)), and measured
+        // on a Radeon Pro 5500M (counterbalanced, one process per config, cooldown between
+        // runs -- see results/phase-l4-intdot.md) that emulation is still a large win for
+        // batched matmul and a loss for the single-column vector path:
+        //
+        //   Qwen3-4B-Instruct-2507 Q4_K_M, -ngl 99 -fa off      pp512      tg128
+        //     integer dot off (upstream default)                34.9       35.8
+        //     integer dot on, both paths                        58.1       13.5-28.3
+        //     integer dot on, mul_mat_vec on the float path     58.9       36.3
+        //
+        // So enable it and pin mmvq to the float route: +69% prefill, no decode regression.
+        // This also avoids the multi-column mul_mat_vecq q8_0 defect on this driver.
+        if (device->vendor_id == VK_VENDOR_ID_AMD && !getenv("GGML_VK_DISABLE_INTEGER_DOT_PRODUCT")) {
+            device->integer_dot_product = integer_dot_extension;
+        }
+#endif
 
         device->min_imported_host_pointer_alignment = external_memory_host_props.minImportedHostPointerAlignment;
 
@@ -6751,6 +6779,14 @@ static vk_device ggml_vk_get_device(size_t idx) {
             std::max(4u, (uint32_t)device->properties.limits.minStorageBufferOffsetAlignment);
 
         device->mmvq_mode = 0;
+#ifdef __APPLE__
+        // Emulated integer dot (see above) loses to float dequant for mul_mat_vec, which is
+        // memory-bound and single-column: tg128 35.8 -> 13-28 t/s. Default it off here; the
+        // env knobs below still override in either direction for measurement.
+        if (device->vendor_id == VK_VENDOR_ID_AMD && device->integer_dot_product) {
+            device->mmvq_mode = -1;
+        }
+#endif
         if (getenv("GGML_VK_DISABLE_MMVQ")) {
             device->mmvq_mode = -1;
         } else if (getenv("GGML_VK_FORCE_MMVQ")) {
