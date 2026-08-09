@@ -6107,6 +6107,27 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #endif
         device->subgroup_clustered = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                      (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eClustered);
+#ifdef __APPLE__
+        // Complete the MoltenVK subgroup workaround above: clustered operations are
+        // mistranslated the same way arithmetic and shuffle are, and this flag was the last
+        // path still reaching them. quantize_q8_1's subgroup variant indexes work by
+        // gl_SubgroupInvocationID and reduces each 8-lane block with subgroupClusteredMax and
+        // subgroupClusteredAdd; under MoltenVK the cluster does not cover the intended 8
+        // lanes, so every q8_1 block gets a wrong scale and sum. That corrupts the quantized
+        // activations consumed by BOTH integer-dot matmul paths (mmq and mmvq), which is why
+        // enabling integer dot made test-backend-ops -o MUL_MAT fail with err ~1.0 (output
+        // uncorrelated with the reference) while disabling mmvq alone did not help.
+        // Clearing the flag routes quantize_q8_1 to its shared-memory reduction, indexed by
+        // gl_LocalInvocationID -- the same fix shape as ssm_scan/gated_delta_net.
+        //
+        // No effect in the default configuration on this platform: integer dot is already
+        // off (MoltenVK reports integerDotProduct4x8BitPackedSignedAccelerated = false), and
+        // the other consumer of this flag, the clustered flash-attention reduction, is
+        // additionally gated on subgroup_arithmetic, which is cleared above.
+        if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
+            device->subgroup_clustered = false;
+        }
+#endif
 
         device->subgroup_ballot = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                   (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eBallot);
