@@ -3445,6 +3445,17 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device, 
         result.subgroup_size = device->subgroup_size;
     }
 
+#ifdef __APPLE__
+    // Diagnostic knob (mac-radeon-ai): MoltenVK cannot enforce a required subgroup size for
+    // compute, so the sizes requested above are advisory at best. Allows A/B-ing the
+    // subgroup FA path against the shared-memory one in a single binary, which is the only
+    // way to counterbalance the comparison on a machine that drifts this much.
+    if (device->vendor_id == VK_VENDOR_ID_AMD && getenv("GGML_VK_FA_NO_SUBGROUPS")) {
+        result.subgroup_size = device->subgroup_size;
+        result.disable_subgroups = true;
+    }
+#endif
+
     // Row split splits the workgroup so that synchronization only has to happen within subgroups, which avoids barriers
     uint32_t row_split_max_hsk = 64;
     if (device->vendor_id == VK_VENDOR_ID_AMD && device->architecture != AMD_GCN && !device->uma) {
