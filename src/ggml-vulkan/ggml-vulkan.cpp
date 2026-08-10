@@ -342,6 +342,21 @@ enum vk_device_architecture {
     NVIDIA_TURING,
 };
 
+// MoltenVK encodes its version as major*10000 + minor*100 + patch (1.4.2 -> 10402).
+// Up to 1.4.1 it reported subgroupSize 64 on AMD Macs while Metal runs 32-wide SIMD groups;
+// every subgroup reduction therefore spanned the wrong lane count, which is the single root
+// cause of the arithmetic/shuffle/clustered mistranslations. 1.4.2 corrects the report, and
+// MUL_MAT, SSM_SCAN and GATED_DELTA_NET all pass with those workarounds off.
+static bool mvk_subgroups_trustworthy(uint32_t driver_version) {
+    if (getenv("GGML_VK_FORCE_MOLTENVK_WORKAROUNDS")) {
+        return false;
+    }
+    if (getenv("GGML_VK_NO_MOLTENVK_WORKAROUNDS")) {
+        return true;
+    }
+    return driver_version >= 10402;
+}
+
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
 
@@ -6103,7 +6118,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         // (UHD 630): the subgroup mul_mat_vec shaders produce numerically wrong matmul
         // (test-backend-ops -o MUL_MAT: every case fails, err 2-11) -> token-salad. Disabling
         // subgroup arithmetic routes Intel to the non-subgroup shaders AMD already uses here.
-        if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
+        if ((device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) &&
+            !mvk_subgroups_trustworthy(props2.properties.driverVersion)) {
             device->subgroup_arithmetic = false;
         }
 #endif
@@ -6117,7 +6133,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         // to CPU. The bug it guards against, issue 15846, is about subgroup *arithmetic*.
         // Knob to test whether shuffle is actually mistranslated here or was disabled with it.
         if ((device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) &&
-            !getenv("GGML_VK_ENABLE_SUBGROUP_SHUFFLE")) {
+            !mvk_subgroups_trustworthy(props2.properties.driverVersion)) {
             device->subgroup_shuffle = false;
         }
 #endif
@@ -6140,7 +6156,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         // off (MoltenVK reports integerDotProduct4x8BitPackedSignedAccelerated = false), and
         // the other consumer of this flag, the clustered flash-attention reduction, is
         // additionally gated on subgroup_arithmetic, which is cleared above.
-        if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
+        if ((device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) &&
+            !mvk_subgroups_trustworthy(props2.properties.driverVersion)) {
             device->subgroup_clustered = false;
         }
 #endif
