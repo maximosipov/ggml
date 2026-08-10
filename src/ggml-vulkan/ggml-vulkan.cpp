@@ -9137,6 +9137,18 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
 
 // Device tuning
 static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_t n, uint32_t k, ggml_type src0_type) {
+#ifdef __APPLE__
+    // mac-radeon-ai: the multi-column mul_mat_vecq variant returns wrong results for q8_0 on
+    // MoltenVK (n=2..9 fail at err ~1.0; n=1 and the mul_mmq path are correct, and mxfp4 --
+    // which compiles the identical QUANT_R==1/K_PER_ITER==8 branch -- passes). Root cause not
+    // yet found; ruled out are the dotPacked4x8EXT translation, the pack32(i16vec2) repack,
+    // the 34-byte block layout and subgroup ops (this shader contains none). Refuse the path
+    // for this type so GGML_VK_FORCE_MMVQ cannot resurrect the defect.
+    if (src0_type == GGML_TYPE_Q8_0 &&
+        (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL)) {
+        return false;
+    }
+#endif
     if (device->mmvq_mode == 1) {
         return true;
     } else if (device->mmvq_mode == -1) {
