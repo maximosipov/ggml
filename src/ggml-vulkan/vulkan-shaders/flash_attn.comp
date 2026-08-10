@@ -226,14 +226,32 @@ void main() {
                     }
                 }
                 // skip the block if the mask is entirely -inf
-                bool all_less = subgroupAll(max_mask <= NEG_FLT_MAX_OVER_2);
-                barrier();
-                if (gl_SubgroupInvocationID == 0) {
-                    tmpsh[gl_SubgroupID] = all_less ? NEG_FLT_MAX_OVER_2 : 0.0f;
-                }
-                barrier();
-                [[unroll]] for (uint s = 0; s < gl_NumSubgroups; ++s) {
-                    max_mask = max(max_mask, tmpsh[s]);
+                if (SubGroupSize > 0) {
+                    bool all_less = subgroupAll(max_mask <= NEG_FLT_MAX_OVER_2);
+                    barrier();
+                    if (gl_SubgroupInvocationID == 0) {
+                        tmpsh[gl_SubgroupID] = all_less ? NEG_FLT_MAX_OVER_2 : 0.0f;
+                    }
+                    barrier();
+                    [[unroll]] for (uint s = 0; s < gl_NumSubgroups; ++s) {
+                        max_mask = max(max_mask, tmpsh[s]);
+                    }
+                } else {
+                    // No-subgroup path: reduce the same max over the whole workgroup in
+                    // shared memory, indexed by gl_LocalInvocationID. Needed on drivers where
+                    // subgroup ops are mistranslated (MoltenVK) -- without this the mask
+                    // block-skip is the one remaining subgroup dependency in this shader.
+                    barrier();
+                    tmpsh[tid] = max_mask;
+                    barrier();
+                    [[unroll]] for (uint s = WorkGroupSize / 2; s > 0; s >>= 1) {
+                        if (tid < s) {
+                            tmpsh[tid] = max(tmpsh[tid], tmpsh[tid + s]);
+                        }
+                        barrier();
+                    }
+                    max_mask = tmpsh[0];
+                    barrier();
                 }
                 if (max_mask <= NEG_FLT_MAX_OVER_2) {
                     continue;

@@ -3450,7 +3450,7 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device, 
     // compute, so the sizes requested above are advisory at best. Allows A/B-ing the
     // subgroup FA path against the shared-memory one in a single binary, which is the only
     // way to counterbalance the comparison on a machine that drifts this much.
-    if (device->vendor_id == VK_VENDOR_ID_AMD && getenv("GGML_VK_FA_NO_SUBGROUPS")) {
+    if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
         result.subgroup_size = device->subgroup_size;
         result.disable_subgroups = true;
     }
@@ -6112,7 +6112,12 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #ifdef __APPLE__
         // mac-radeon-ai: extend the AMD subgroup_shuffle workaround to Intel iGPUs too
         // (same MoltenVK subgroup mistranslation, see subgroup_arithmetic above).
-        if (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) {
+        // mac-radeon-ai: this disable is what makes FLASH_ATTN_EXT unsupported on Vulkan
+        // (the scalar path requires subgroupShuffle + subgroupAll), so every FA op falls back
+        // to CPU. The bug it guards against, issue 15846, is about subgroup *arithmetic*.
+        // Knob to test whether shuffle is actually mistranslated here or was disabled with it.
+        if ((device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) &&
+            !getenv("GGML_VK_ENABLE_SUBGROUP_SHUFFLE")) {
             device->subgroup_shuffle = false;
         }
 #endif
@@ -17633,7 +17638,18 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 }
                 if (!coopmat2 && !(device->subgroup_shuffle && device->subgroup_vote)) {
                     // scalar/coopmat1 FA uses subgroupShuffle/subgroupAll
+#ifdef __APPLE__
+                    // mac-radeon-ai: on MoltenVK those ops are mistranslated, so the flags
+                    // above are cleared -- which made FLASH_ATTN_EXT unsupported outright and
+                    // sent every attention op to the CPU. The scalar shader has a
+                    // subgroup-free path (SubGroupSize == 0, shared-memory reductions), so
+                    // take that instead of falling back off the GPU entirely.
+                    if (device->vendor_id != VK_VENDOR_ID_AMD && device->vendor_id != VK_VENDOR_ID_INTEL) {
+                        return false;
+                    }
+#else
                     return false;
+#endif
                 }
                 return true;
             }
