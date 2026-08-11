@@ -4237,6 +4237,17 @@ static bool ggml_vk_fa_type_needs_shmem(ggml_type type) {
 
 static bool ggml_vk_fa_scalar_uses_mmq(const vk_device& device, ggml_type k_type, ggml_type v_type) {
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    // mac-radeon-ai: keep q8_0 off the MMQ path on MoltenVK. Its block loader in
+    // flash_attn_mmq_funcs.glsl is the only one that repacks through
+    // pack32(i16vec2(...)) from a 16-bit view; every other type packs from
+    // u16vec2. On this driver that mistranslates and *every* graded q8_0 case
+    // fails (337/337, err 0.041-0.092 against a 5e-4 tolerance), while f16,
+    // q4_0, q4_1, q5_0/1 and iq4_nl all pass. Same defect family as the q8_0
+    // mul_mat_vecq guard. Without this, enabling integer dot silently turns
+    // q8_0 KV from correct-but-slow into fast-and-wrong.
+    if (device->driver_id == vk::DriverId::eMoltenvk && k_type == GGML_TYPE_Q8_0) {
+        return false;
+    }
     return device->integer_dot_product && device->subgroup_clustered &&
            !ggml_vk_fa_type_needs_shmem(v_type) &&
            (k_type == GGML_TYPE_Q4_0 || k_type == GGML_TYPE_Q4_1 ||
