@@ -51,8 +51,16 @@ specified (native Vulkan AMD/NVIDIA, Linux Mesa).
   matmul paths consume.
 - `vulkan: do not use mul_mat_vecq for q8_0 on MoltenVK` — the multi-column
   `mul_mat_vecq` variant returns wrong results for q8_0 (n=2..9, err ~1.0) on this
-  driver while `n=1` and the `mul_mmq` path are correct. Root cause not found;
-  the guard is unconditional because 1.4.2 does not fix it either.
+  driver while `n=1` and the `mul_mmq` path are correct. The guard is
+  unconditional because 1.4.2 does not fix it either.
+- `vulkan: keep q8_0 off the flash-attention MMQ path on MoltenVK` — the same
+  defect in a second place, and one this branch caused itself. Enabling integer
+  dot makes `ggml_vk_fa_scalar_uses_mmq` accept q8_0, and its MMQ block loader is
+  the only q8_0 path repacking through `pack32(i16vec2(...))` from a 16-bit view;
+  every other type packs from `u16vec2`. Result: **every** graded q8_0 flash
+  attention case failed (337/337, err 0.041–0.092) while q8_0 stayed correct in
+  `GET_ROWS`, `CPY`, `MUL_MAT` and friends. Routing it back to the dequantize
+  path restores 4757/4757. This is the shared root cause of both q8_0 defects.
 
 **Performance** — both were software ceilings, not silicon limits:
 
@@ -172,10 +180,9 @@ is the exact regression test the shader fixes were validated against. `MUL_MAT`
 covers the matmul, clustered-quantizer and integer-dot changes together.
 
 `FLASH_ATTN_EXT` is the one to read carefully: before the fix it reported *0 cases
-supported*, which is not the same as passing. Expect roughly 4749 OK with ~10
-marginal failures at err 0.0007–0.0015 against a 5e-4 tolerance (`hsk=40/64`,
-`sinks=1`) — over tolerance, but not a class failure, and untriaged as to whether
-they predate this branch.
+supported*, which is not the same as passing. Expect **4757/4757** now that q8_0
+is routed off the MMQ path; if you see ~337 failures all with `type_K=q8_0`, you
+are on a build without that fix.
 
 For full backend coverage: `./build/bin/test-backend-ops -b Vulkan0` (no `-o`
 filter) — expect a small number of intentional CPU fallbacks (e.g. `CUMSUM`),
